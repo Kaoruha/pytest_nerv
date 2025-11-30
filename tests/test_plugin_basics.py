@@ -1,6 +1,8 @@
 import io
+import os
+import shutil
 
-from pytest_nerv.plugin import TestStatus, TUIRenderer, TUIState
+from pytest_nerv.plugin import TestStatus, TUIRenderer, TUIState, auto_advance_page
 
 
 def test_state_transitions_and_counts() -> None:
@@ -33,7 +35,8 @@ def test_log_window_toggle_and_limit() -> None:
     assert state.visible_logs() == ["line 1", "line 2", "line 3", "line 4"]
 
 
-def test_renderer_builds_screen_with_ansi_blocks() -> None:
+def test_renderer_builds_screen_with_ansi_blocks(monkeypatch) -> None:
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 24)))
     state = TUIState(log_height=2)
     state.register_tests(["test_a.py::test_one"])
     state.mark_outcome("test_a.py::test_one", TestStatus.PASSED)
@@ -42,4 +45,47 @@ def test_renderer_builds_screen_with_ansi_blocks() -> None:
     screen = renderer.build_screen()
 
     assert "\x1b[42m" in screen  # green background for passed blocks
+    assert "passed \x1b[32m1\x1b[0m" in screen  # colored count only
+    assert "overall:" in screen
+    assert "passed 1 (100.0%)" in screen
     assert "Logs" in screen
+
+
+def test_ratio_line_includes_pending(monkeypatch) -> None:
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=None: os.terminal_size((80, 24)))
+    state = TUIState(log_height=2)
+    state.register_tests(["test_a.py::test_one", "test_b.py::test_two"])
+    # Leave both pending to exercise pending ratio display.
+
+    renderer = TUIRenderer(state, stream=io.StringIO())
+    screen = renderer.build_screen()
+
+    assert "overall:" in screen
+    assert "pending 2 (100.0%)" in screen
+
+
+def test_auto_advance_page_moves_when_page_complete() -> None:
+    state = TUIState()
+    tests = [f"test_{idx}" for idx in range(12)]
+    state.register_tests(tests)
+    width = 10  # small width to force a low page_size (10 tests per page)
+
+    # Should not move while page tests are pending.
+    moved = auto_advance_page(state, max_block_rows=5, width=width)
+    assert moved is False
+    assert state.get_page() == 0
+
+    for nodeid in tests[:10]:
+        state.mark_outcome(nodeid, TestStatus.PASSED)
+
+    moved = auto_advance_page(state, max_block_rows=5, width=width)
+    assert moved is True
+    assert state.get_page() == 1
+
+    # Last page done; no further advancement.
+    for nodeid in tests[10:]:
+        state.mark_outcome(nodeid, TestStatus.PASSED)
+
+    moved = auto_advance_page(state, max_block_rows=5, width=width)
+    assert moved is False
+    assert state.get_page() == 1

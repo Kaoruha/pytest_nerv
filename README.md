@@ -14,6 +14,7 @@ Interactive TUI reporter for pytest. Replaces the default terminal output with a
   ```
 - Toggle log window: press `Ctrl+O`.
 - Paginate the grid when there are many tests: `n` or `]` for next page, `p` or `[` for previous page.
+  - The view auto-advances to the next page when all tests on the current page finish.
 
 ## Features
 - Color-coded status blocks (pending, running, passed, skipped, failed) with per-test indices.

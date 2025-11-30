@@ -27,18 +27,34 @@ class TestStatus(str, Enum):
 ANSI_RESET = "\x1b[0m"
 STATUS_COLORS: Dict[TestStatus, str] = {
     TestStatus.PENDING: "\x1b[100m",  # bright black background
-    TestStatus.RUNNING: "\x1b[43m",  # yellow background
+    TestStatus.RUNNING: "\x1b[44m",  # blue background (was yellow)
     TestStatus.PASSED: "\x1b[42m",  # green background
     TestStatus.FAILED: "\x1b[41m",  # red background
-    TestStatus.SKIPPED: "\x1b[44m",  # blue background
+    TestStatus.SKIPPED: "\x1b[43m",  # yellow background (was blue)
 }
 STATUS_SYMBOLS: Dict[TestStatus, str] = {
-    TestStatus.PENDING: "?",
-    TestStatus.RUNNING: ">",
-    TestStatus.PASSED: "+",
-    TestStatus.FAILED: "X",
+    TestStatus.PENDING: "?",  # keep indicator for undispatched tests
+    TestStatus.RUNNING: " ",  # no symbol while running
+    TestStatus.PASSED: " ",  # no symbol for success
+    TestStatus.FAILED: " ",  # no symbol for failure
     TestStatus.SKIPPED: "~",
 }
+COUNT_COLORS: Dict[TestStatus, str] = {
+    TestStatus.PASSED: "\x1b[32m",  # green text
+    TestStatus.FAILED: "\x1b[31m",  # red text
+    TestStatus.RUNNING: "\x1b[34m",  # blue text
+    TestStatus.SKIPPED: "\x1b[33m",  # yellow text
+    TestStatus.PENDING: "\x1b[90m",  # bright black text
+}
+
+
+def _compute_pagination(num_tests: int, max_block_rows: int, width: int) -> Tuple[int, int, int, int]:
+    block_width = max(3, len(str(max(1, num_tests))))
+    block_slot_width = block_width + 1  # width plus a spacer
+    blocks_per_row = max(1, width // block_slot_width)
+    page_size = max(1, blocks_per_row * max_block_rows)
+    total_pages = max(1, (num_tests + page_size - 1) // page_size)
+    return block_width, blocks_per_row, page_size, total_pages
 
 
 class TUIState:
@@ -264,6 +280,10 @@ class TUIRenderer:
         lines: List[str] = []
         lines.append("pytest-nerv — TUI reporter (Ctrl+O toggles logs)")
         lines.append(self._render_counts_line(view, width))
+        ratio_line = self._render_ratio_line(view, width)
+        if ratio_line:
+            lines.append(ratio_line)
+            lines.append("-" * width)  # divider between ratio line and grid
         grid_lines, page_info = self._render_grid(view, width)
         lines.extend(grid_lines)
         if page_info:
@@ -303,19 +323,67 @@ class TUIRenderer:
         counts: Dict[TestStatus, int] = {status: 0 for status in TestStatus}
         for status in statuses.values():
             counts[status] = counts.get(status, 0) + 1
+        color_num = lambda count, status: f"{COUNT_COLORS.get(status, '')}{count}{ANSI_RESET if status in COUNT_COLORS else ''}"
 
         parts = [
             f"total {len(statuses)}",
-            f"passed {counts[TestStatus.PASSED]}",
-            f"failed {counts[TestStatus.FAILED]}",
-            f"running {counts[TestStatus.RUNNING]}",
-            f"skipped {counts[TestStatus.SKIPPED]}",
+            f"passed {color_num(counts[TestStatus.PASSED], TestStatus.PASSED)}",
+            f"failed {color_num(counts[TestStatus.FAILED], TestStatus.FAILED)}",
+            f"running {color_num(counts[TestStatus.RUNNING], TestStatus.RUNNING)}",
+            f"skipped {color_num(counts[TestStatus.SKIPPED], TestStatus.SKIPPED)}",
         ]
         active = view.get("active_test")
         if active:
             parts.append(f"active {active}")
-        text = " | ".join(parts)
-        return text if len(text) < width else text[: width - 1]
+        return " | ".join(parts)
+
+    def _render_ratio_line(self, view: Dict[str, object], width: int) -> Optional[str]:
+        statuses: Dict[str, TestStatus] = view["statuses"]  # type: ignore[assignment]
+        total = len(statuses)
+        if total == 0:
+            return None
+
+        counts: Dict[TestStatus, int] = {status: 0 for status in TestStatus}
+        for status in statuses.values():
+            counts[status] += 1
+
+        bar_width = max(10, min(50, width // 2))
+        order = [
+            TestStatus.PASSED,
+            TestStatus.FAILED,
+            TestStatus.SKIPPED,
+            TestStatus.RUNNING,
+            TestStatus.PENDING,
+        ]
+        raw_lengths = [counts[s] * bar_width / total for s in order]
+        lengths = [int(x) for x in raw_lengths]
+        remainder = bar_width - sum(lengths)
+        if remainder != 0:
+            fractions = [x - int(x) for x in raw_lengths]
+            # Distribute remaining space based on largest fractional parts.
+            for _ in range(abs(remainder)):
+                if not fractions:
+                    break
+                idx = max(range(len(fractions)), key=lambda i: fractions[i])
+                lengths[idx] += 1 if remainder > 0 else -1 if lengths[idx] > 0 else 0
+                fractions[idx] = 0
+
+        bar_parts: List[str] = []
+        for status, length in zip(order, lengths):
+            if length <= 0 or counts[status] == 0:
+                continue
+            bar_parts.append(f"{STATUS_COLORS[status]}{' ' * length}{ANSI_RESET}")
+        bar = "".join(bar_parts) if bar_parts else " " * bar_width
+
+        info_parts: List[str] = []
+        for status in order:
+            count = counts[status]
+            if count == 0:
+                continue
+            pct = (count / total) * 100
+            info_parts.append(f"{status.value} {count} ({pct:.1f}%)")
+
+        return f"overall: {bar} {' | '.join(info_parts)}"
 
     def _render_grid(self, view: Dict[str, object], width: int) -> Tuple[List[str], Optional[str]]:
         tests: List[str] = view["tests"]  # type: ignore[assignment]
@@ -323,11 +391,10 @@ class TUIRenderer:
         if not tests:
             return ["(no collected tests)"], None
 
-        block_width = max(3, len(str(len(tests))))  # allow 4+ digit indices
+        block_width, blocks_per_row, page_size, total_pages = _compute_pagination(
+            len(tests), self.max_block_rows, width
+        )
         block_height = 4  # 3x3 for color/shape + 1 line for index
-        block_slot_width = block_width + 1  # include spacing between blocks
-        blocks_per_row = max(1, width // block_slot_width)
-        page_size = max(1, blocks_per_row * self.max_block_rows)
 
         def make_block(idx: int, status: TestStatus) -> List[str]:
             color = STATUS_COLORS.get(status, STATUS_COLORS[TestStatus.PENDING])
@@ -344,7 +411,6 @@ class TUIRenderer:
             status = statuses.get(nodeid, TestStatus.PENDING)
             blocks.append(make_block(idx, status))
 
-        total_pages = max(1, (len(blocks) + page_size - 1) // page_size)
         page_index = self.state.clamp_page(total_pages)
         start_block = page_index * page_size
         visible_blocks = blocks[start_block : start_block + page_size]
@@ -480,6 +546,8 @@ class NervPlugin:
         self._started = True
 
     def _render(self) -> None:
+        width = shutil.get_terminal_size((80, 24)).columns
+        auto_advance_page(self.state, self.renderer.max_block_rows, width)
         self.silencer.start()
         self.renderer.render()
 
@@ -568,3 +636,30 @@ def should_enable(config: object) -> bool:
     if nerv is False:
         return False
     return sys.stdout.isatty()
+
+
+def auto_advance_page(state: TUIState, max_block_rows: int, width: int) -> bool:
+    """Advance to the next page when all tests on the current page are finished."""
+    view = state.snapshot()
+    tests: List[str] = view["tests"]  # type: ignore[assignment]
+    statuses: Dict[str, TestStatus] = view["statuses"]  # type: ignore[assignment]
+    if not tests:
+        return False
+
+    _, _, page_size, total_pages = _compute_pagination(len(tests), max_block_rows, width)
+    page_index = state.clamp_page(total_pages)
+    if page_index >= total_pages - 1:
+        return False
+
+    start = page_index * page_size
+    end = min(len(tests), start + page_size)
+    page_tests = tests[start:end]
+    if not page_tests:
+        return False
+
+    unfinished = {TestStatus.PENDING, TestStatus.RUNNING}
+    if all(statuses.get(nodeid, TestStatus.PENDING) not in unfinished for nodeid in page_tests):
+        state.set_page(page_index + 1)
+        return True
+
+    return False
