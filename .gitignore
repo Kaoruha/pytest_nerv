@@ -1,0 +1,15 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Virtual envs
+.venv/
+
+# Packaging artifacts
+*.egg-info/
+dist/
+build/
+
+# Logs
+.pytest_cache/
+*.log
