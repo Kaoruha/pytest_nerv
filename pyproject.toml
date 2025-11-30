@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytest-nerv"
+version = "0.1.0"
+description = "Interactive TUI reporter for pytest that replaces native output with a dual-pane view."
+readme = "AGENTS.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "pytest-nerv contributors" }]
+dependencies = ["pytest>=7.3"]
+
+[project.urls]
+Homepage = "https://example.com/pytest-nerv"
+Repository = "https://example.com/pytest-nerv.git"
+
+[project.entry-points.pytest11]
+nerv = "pytest_nerv"
+
+[tool.setuptools.packages.find]
+where = ["src"]

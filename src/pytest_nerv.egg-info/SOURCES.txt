@@ -1,0 +1,11 @@
+AGENTS.md
+pyproject.toml
+src/pytest_nerv/__init__.py
+src/pytest_nerv/plugin.py
+src/pytest_nerv.egg-info/PKG-INFO
+src/pytest_nerv.egg-info/SOURCES.txt
+src/pytest_nerv.egg-info/dependency_links.txt
+src/pytest_nerv.egg-info/entry_points.txt
+src/pytest_nerv.egg-info/requires.txt
+src/pytest_nerv.egg-info/top_level.txt
+tests/test_plugin_basics.py
