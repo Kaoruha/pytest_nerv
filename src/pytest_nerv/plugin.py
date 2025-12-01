@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import pytest
+import re
 import select
 import shutil
 import sys
@@ -46,6 +47,50 @@ COUNT_COLORS: Dict[TestStatus, str] = {
     TestStatus.SKIPPED: "\x1b[33m",  # yellow text
     TestStatus.PENDING: "\x1b[90m",  # bright black text
 }
+ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
+
+def _visible_width(text: str) -> int:
+    return len(ANSI_RE.sub("", text))
+
+
+def _truncate_ansi(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if _visible_width(text) <= width:
+        return text
+
+    visible = 0
+    pieces: List[str] = []
+    idx = 0
+    while idx < len(text) and visible < width:
+        if text[idx] == "\x1b":
+            match = ANSI_RE.match(text, idx)
+            if match:
+                pieces.append(match.group(0))
+                idx = match.end()
+                continue
+        pieces.append(text[idx])
+        visible += 1
+        idx += 1
+
+    if not "".join(pieces).endswith(ANSI_RESET):
+        pieces.append(ANSI_RESET)
+    return "".join(pieces)
+
+
+def _ellipsize_middle(text: str, max_length: int) -> str:
+    if max_length <= 0:
+        return ""
+    if len(text) <= max_length:
+        return text
+    if max_length <= 3:
+        return text[:max_length]
+
+    keep = max_length - 3
+    left = keep // 2
+    right = keep - left
+    return f"{text[:left]}...{text[-right:]}"
 
 
 def _compute_pagination(num_tests: int, max_block_rows: int, width: int) -> Tuple[int, int, int, int]:
@@ -257,6 +302,7 @@ class TUIRenderer:
         self.stream = stream or self._open_tty() or getattr(sys, "__stdout__", sys.stdout)
         self._cursor_hidden = False
         self._last_frame: Optional[str] = None
+        self._last_line_count = 0
         # Consider both captured and real stdout for TTY detection.
         self.enabled = any(
             checker()
@@ -293,8 +339,13 @@ class TUIRenderer:
         lines.append("")
         lines.append(self._render_log_header(view))
         lines.extend(self._render_logs(width))
-        clear_prefix = f"{ANSI_RESET}\x1b[H\x1b[J"
-        return clear_prefix + "\n".join(lines) + ANSI_RESET
+        pad_lines = max(0, self._last_line_count - len(lines))
+        if pad_lines:
+            lines.extend([""] * pad_lines)
+        self._last_line_count = len(lines)
+        cleared_lines = [f"{line}\x1b[K" for line in lines]
+        clear_prefix = f"{ANSI_RESET}\x1b[H"
+        return clear_prefix + "\n".join(cleared_lines) + ANSI_RESET
 
     def render(self) -> None:
         if not self.enabled:
@@ -325,17 +376,24 @@ class TUIRenderer:
             counts[status] = counts.get(status, 0) + 1
         color_num = lambda count, status: f"{COUNT_COLORS.get(status, '')}{count}{ANSI_RESET if status in COUNT_COLORS else ''}"
 
-        parts = [
+        base_parts = [
             f"total {len(statuses)}",
             f"passed {color_num(counts[TestStatus.PASSED], TestStatus.PASSED)}",
             f"failed {color_num(counts[TestStatus.FAILED], TestStatus.FAILED)}",
             f"running {color_num(counts[TestStatus.RUNNING], TestStatus.RUNNING)}",
             f"skipped {color_num(counts[TestStatus.SKIPPED], TestStatus.SKIPPED)}",
         ]
+        parts = list(base_parts)
         active = view.get("active_test")
         if active:
-            parts.append(f"active {active}")
-        return " | ".join(parts)
+            base_width = _visible_width(" | ".join(parts))
+            available_for_active = width - base_width - len(" | ")
+            if available_for_active > len("active"):
+                max_active_text = max(1, available_for_active - len("active "))
+                active_text = _ellipsize_middle(str(active), max_active_text)
+                parts.append(f"active {active_text}")
+        line = " | ".join(parts)
+        return _truncate_ansi(line, width)
 
     def _render_ratio_line(self, view: Dict[str, object], width: int) -> Optional[str]:
         statuses: Dict[str, TestStatus] = view["statuses"]  # type: ignore[assignment]
@@ -347,7 +405,6 @@ class TUIRenderer:
         for status in statuses.values():
             counts[status] += 1
 
-        bar_width = max(10, min(50, width // 2))
         order = [
             TestStatus.PASSED,
             TestStatus.FAILED,
@@ -355,6 +412,19 @@ class TUIRenderer:
             TestStatus.RUNNING,
             TestStatus.PENDING,
         ]
+        desired_bar_width = max(10, min(50, width // 2))
+        info_parts: List[str] = []
+        for status in order:
+            count = counts[status]
+            if count == 0:
+                continue
+            pct = (count / total) * 100
+            info_parts.append(f"{status.value} {count} ({pct:.1f}%)")
+        info_text = " | ".join(info_parts)
+        prefix = "overall: "
+        available_for_bar = width - _visible_width(prefix) - (1 + len(info_text) if info_text else 0)
+        bar_width = min(desired_bar_width, max(0, available_for_bar))
+
         raw_lengths = [counts[s] * bar_width / total for s in order]
         lengths = [int(x) for x in raw_lengths]
         remainder = bar_width - sum(lengths)
@@ -375,15 +445,10 @@ class TUIRenderer:
             bar_parts.append(f"{STATUS_COLORS[status]}{' ' * length}{ANSI_RESET}")
         bar = "".join(bar_parts) if bar_parts else " " * bar_width
 
-        info_parts: List[str] = []
-        for status in order:
-            count = counts[status]
-            if count == 0:
-                continue
-            pct = (count / total) * 100
-            info_parts.append(f"{status.value} {count} ({pct:.1f}%)")
-
-        return f"overall: {bar} {' | '.join(info_parts)}"
+        line = f"{prefix}{bar}"
+        if info_text:
+            line = f"{line} {info_text}"
+        return _truncate_ansi(line, width)
 
     def _render_grid(self, view: Dict[str, object], width: int) -> Tuple[List[str], Optional[str]]:
         tests: List[str] = view["tests"]  # type: ignore[assignment]
